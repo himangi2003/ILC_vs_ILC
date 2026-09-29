@@ -6,12 +6,13 @@ Install:
     pip install pandas numpy scipy
 
 Example:
-    python compare_groups.py \
-        --features-csv tils_tsr_features.csv \
-        --group-a group_A.txt \
-        --group-b group_B.txt \
-        --features feature_column_1 feature_column_2 \
-        --output-dir comparison_results
+pip install pandas numpy scipy
+
+python compare_groups.py \
+  --group-a group_A_features.csv \
+  --group-b group_B_features.csv \
+  --features feature_column_1 feature_column_2 \
+  --output-dir comparison_results
 
 Replace feature_column_1 and feature_column_2 with actual CSV column names.
 
@@ -157,7 +158,163 @@ def compare_feature(feature, group_a, group_b):
     })
 
     return result
+def plot_results(a, b, results, output_dir):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from textwrap import fill
 
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    colors = ["#377EB8", "#E68632"]
+    rng = np.random.default_rng(42)
+    features = results["feature"].tolist()
+
+    def label(feature):
+        return fill(feature.replace("wsi_", "").replace("_", " "), width=38)
+
+    # Patient-level distributions: each dot represents one patient.
+    ncols = 3
+    nrows = (len(features) + ncols - 1) // ncols
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=(15, 4.5 * nrows),
+        squeeze=False,
+    )
+
+    indexed_results = results.set_index("feature")
+
+    for ax, feature in zip(axes.flat, features):
+        values = [
+            a[feature].dropna().to_numpy(dtype=float),
+            b[feature].dropna().to_numpy(dtype=float),
+        ]
+
+        for position, (group_values, color) in enumerate(
+            zip(values, colors), start=1
+        ):
+            if not len(group_values):
+                continue
+
+            box = ax.boxplot(
+                group_values,
+                positions=[position],
+                widths=0.45,
+                patch_artist=True,
+                showfliers=False,
+                medianprops={"color": "black"},
+            )
+            box["boxes"][0].set_facecolor(color)
+            box["boxes"][0].set_alpha(0.35)
+
+            ax.scatter(
+                rng.normal(position, 0.055, len(group_values)),
+                group_values,
+                s=15,
+                alpha=0.5,
+                color=color,
+                edgecolors="none",
+            )
+
+        q = indexed_results.loc[feature, "FDR_q"]
+        q_text = f"FDR q = {q:.3g}" if np.isfinite(q) else "Not testable"
+
+        ax.set_title(f"{label(feature)}\n{q_text}", fontsize=10)
+        ax.set_xticks([1, 2])
+        ax.set_xticklabels([
+            f"Lobular\nn = {len(values[0])}",
+            f"Ductal\nn = {len(values[1])}",
+        ])
+        ax.set_xlim(0.5, 2.5)
+        ax.set_ylabel("Patient median across WSIs")
+        ax.grid(axis="y", alpha=0.2)
+        ax.spines[["top", "right"]].set_visible(False)
+
+    for ax in axes.flat[len(features):]:
+        ax.set_visible(False)
+
+    fig.suptitle(
+        "Tumor morphology: Lobular vs Ductal",
+        fontsize=16,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.savefig(output_dir / "patient_distributions.png", dpi=300)
+    fig.savefig(output_dir / "patient_distributions.pdf")
+    plt.close(fig)
+
+    # Separate axes preserve each feature's original units.
+    valid = results.loc[
+        np.isfinite(results["mean_difference_A_minus_B"])
+        & np.isfinite(results["CI95_low"])
+        & np.isfinite(results["CI95_high"])
+    ].copy()
+
+    if valid.empty:
+        print("No valid confidence intervals available for a forest plot.")
+        return
+
+    fig, axes = plt.subplots(
+        len(valid), 1,
+        figsize=(12, max(4, 1.05 * len(valid))),
+        squeeze=False,
+    )
+
+    for ax, (_, row) in zip(axes.flat, valid.iterrows()):
+        difference = row["mean_difference_A_minus_B"]
+        low = row["CI95_low"]
+        high = row["CI95_high"]
+        significant = row["FDR_q"] < 0.05
+        color = "#B2182B" if significant else "#666666"
+
+        ax.axvline(0, color="black", linestyle="--", linewidth=0.8)
+        ax.errorbar(
+            difference,
+            0,
+            xerr=[[difference - low], [high - difference]],
+            fmt="o",
+            color=color,
+            capsize=4,
+        )
+        ax.set_yticks([])
+        ax.set_ylim(-1, 1)
+        ax.set_ylabel(
+            label(row["feature"]),
+            rotation=0,
+            ha="right",
+            va="center",
+            fontsize=9,
+        )
+
+        # Include zero and leave space around the confidence interval.
+        left, right = min(low, 0), max(high, 0)
+        span = right - left
+        padding = 0.15 * span if span > 0 else 1
+        ax.set_xlim(left - padding, right + padding)
+
+        ax.text(
+            1.02, 0.5,
+            f"q = {row['FDR_q']:.3g}",
+            transform=ax.transAxes,
+            va="center",
+            fontsize=9,
+        )
+        ax.spines[["top", "right", "left"]].set_visible(False)
+        ax.grid(axis="x", alpha=0.15)
+
+    fig.suptitle(
+        "Mean difference: Lobular − Ductal\n"
+        "Welch 95% confidence intervals; red indicates FDR q < 0.05\n"
+        "Each panel has its own scale and original feature units",
+        fontsize=12,
+    )
+    axes[-1, 0].set_xlabel(
+        "Negative: higher in Ductal    |    Positive: higher in Lobular"
+    )
+    fig.tight_layout(rect=[0, 0, 0.95, 0.94])
+    fig.savefig(output_dir / "mean_differences.png", dpi=300)
+    fig.savefig(output_dir / "mean_differences.pdf")
+    plt.close(fig)
 
 def main():
     parser = argparse.ArgumentParser(
@@ -199,6 +356,7 @@ def main():
             "a": args.output_dir / "group_A_patient_features.csv",
             "b": args.output_dir / "group_B_patient_features.csv",
         }
+        plot_results(a, b, results, args.output_dir)
         inputs = {args.group_a.resolve(), args.group_b.resolve()}
         if any(path.resolve() in inputs for path in paths.values()):
             raise ValueError("Output paths must not overwrite input files.")
@@ -215,6 +373,8 @@ def main():
             results["significant_FDR_0.05"].sum(),
         )
         print(f"Results: {paths['results']}")
+
+        
 
     except (OSError, ValueError, pd.errors.ParserError) as exc:
         parser.error(str(exc))
