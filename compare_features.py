@@ -32,19 +32,68 @@ import pandas as pd
 from scipy import stats
 
 
-def read_ids(path):
-    ids = {
-        line.strip().upper()
-        for line in path.read_text(encoding="utf-8-sig").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-    if not ids:
-        raise ValueError(f"No subject IDs found in {path}")
-    return ids
+def load_group(path, features, subject_column):
+    df = pd.read_csv(path)
+    df.columns = df.columns.str.strip()
+
+    if subject_column not in df:
+        if "sample_id" not in df:
+            raise ValueError(f"{path}: requires subject_id or sample_id")
+
+        samples = df["sample_id"].astype("string").str.strip().str.upper()
+        valid = samples.str.fullmatch(
+            r"TCGA-[A-Z0-9]{2}-[A-Z0-9]{4}-\d{2}", na=False
+        )
+        if not valid.all():
+            raise ValueError(f"{path}: invalid TCGA sample IDs")
+
+        df[subject_column] = samples.str.rsplit("-", n=1).str[0]
+
+    df[subject_column] = (
+        df[subject_column].astype("string").str.strip().str.upper()
+    )
+    if (
+        df[subject_column].isna().any()
+        or df[subject_column].eq("").any()
+    ):
+        raise ValueError(f"{path}: missing subject IDs")
+
+    if df.empty:
+        raise ValueError(f"{path}: no data rows")
+
+    missing = set(features) - set(df.columns)
+    if missing:
+        raise ValueError(f"{path}: missing features: {sorted(missing)}")
+
+    if "wsi_name" in df:
+        named = df.loc[
+            df["wsi_name"].notna()
+            & df["wsi_name"].astype(str).str.strip().ne("")
+        ]
+        if named.duplicated([subject_column, "wsi_name"]).any():
+            raise ValueError(f"{path}: duplicate subject/WSI rows")
+
+    for feature in features:
+        original = df[feature]
+        numeric = pd.to_numeric(original, errors="coerce")
+
+        nonblank = (
+            original.notna()
+            & original.astype(str).str.strip().ne("")
+        )
+        if (nonblank & numeric.isna()).any():
+            raise ValueError(f"{path}: {feature!r} contains nonnumeric values")
+
+        if np.isinf(numeric.dropna().to_numpy(dtype=float)).any():
+            raise ValueError(f"{path}: {feature!r} contains infinite values")
+
+        df[feature] = numeric
+
+    # One observation per patient: median across that patient's WSIs.
+    return df.groupby(subject_column)[features].median()
 
 
 def bh_adjust(p_values):
-    """Benjamini–Hochberg adjustment, excluding untestable features."""
     p = np.asarray(p_values, dtype=float)
     adjusted = np.full(len(p), np.nan)
     valid = np.flatnonzero(np.isfinite(p))
@@ -59,29 +108,28 @@ def bh_adjust(p_values):
     return adjusted
 
 
-def compare_feature(feature, a, b, requested_a, requested_b):
-    a = np.asarray(a, dtype=float)
-    b = np.asarray(b, dtype=float)
+def compare_feature(feature, group_a, group_b):
+    a = group_a[feature].dropna().to_numpy(dtype=float)
+    b = group_b[feature].dropna().to_numpy(dtype=float)
 
     result = {
         "feature": feature,
         "n_A": len(a),
         "n_B": len(b),
-        "missing_A": requested_a - len(a),
-        "missing_B": requested_b - len(b),
+        "missing_A": len(group_a) - len(a),
+        "missing_B": len(group_b) - len(b),
         "mean_A": a.mean() if len(a) else np.nan,
         "mean_B": b.mean() if len(b) else np.nan,
         "median_A": np.median(a) if len(a) else np.nan,
         "median_B": np.median(b) if len(b) else np.nan,
-        "mean_difference_A_minus_B": np.nan,
+        "mean_difference_A_minus_B": (
+            a.mean() - b.mean() if len(a) and len(b) else np.nan
+        ),
         "CI95_low": np.nan,
         "CI95_high": np.nan,
         "p_value": np.nan,
         "status": "insufficient_patients",
     }
-
-    if len(a) and len(b):
-        result["mean_difference_A_minus_B"] = a.mean() - b.mean()
 
     if len(a) < 2 or len(b) < 2:
         return result
@@ -97,6 +145,7 @@ def compare_feature(feature, a, b, requested_a, requested_b):
     degrees_freedom = se_squared**2 / (
         va**2 / (len(a) - 1) + vb**2 / (len(b) - 1)
     )
+
     margin = stats.t.ppf(0.975, degrees_freedom) * np.sqrt(se_squared)
     difference = result["mean_difference_A_minus_B"]
 
@@ -106,150 +155,66 @@ def compare_feature(feature, a, b, requested_a, requested_b):
         "p_value": stats.ttest_ind(a, b, equal_var=False).pvalue,
         "status": "ok",
     })
+
     return result
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--features-csv", required=True, type=Path)
+    parser = argparse.ArgumentParser(
+        description="Compare patient-level features from two group CSV files."
+    )
     parser.add_argument("--group-a", required=True, type=Path)
     parser.add_argument("--group-b", required=True, type=Path)
-    parser.add_argument(
-        "--features", required=True, nargs="+",
-        help="Exact numeric feature column names to compare",
-    )
+    parser.add_argument("--features", required=True, nargs="+")
     parser.add_argument("--subject-column", default="subject_id")
-    parser.add_argument("--sample-column", default="sample_id")
-    parser.add_argument("--output-dir", type=Path, default=Path("comparison_results"))
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("comparison_results")
+    )
     args = parser.parse_args()
 
     try:
-        group_a = read_ids(args.group_a)
-        group_b = read_ids(args.group_b)
+        features = list(dict.fromkeys(args.features))
+        if set(features) & {args.subject_column, "sample_id", "wsi_name"}:
+            raise ValueError("Identifier columns cannot be tested as features.")
 
-        overlap = group_a & group_b
+        a = load_group(args.group_a, features, args.subject_column)
+        b = load_group(args.group_b, features, args.subject_column)
+
+        overlap = set(a.index) & set(b.index)
         if overlap:
             raise ValueError(
-                f"Subjects appear in both groups: {sorted(overlap)[:10]}"
+                f"Patients appear in both groups: {sorted(overlap)[:10]}"
             )
-
-        df = pd.read_csv(args.features_csv)
-        df.columns = df.columns.str.strip()
-
-        # Derive TCGA patient IDs if the CSV only has sample IDs.
-        if args.subject_column not in df:
-            if args.sample_column not in df:
-                raise ValueError(
-                    "CSV must contain a subject-ID or sample-ID column."
-                )
-            samples = df[args.sample_column].astype("string").str.strip().str.upper()
-            if not samples.str.fullmatch(
-                r"TCGA-[A-Z0-9]{2}-[A-Z0-9]{4}-\d{2}", na=False
-            ).all():
-                raise ValueError("Cannot derive subject IDs: invalid TCGA sample IDs.")
-            df[args.subject_column] = samples.str.rsplit("-", n=1).str[0]
-
-        df[args.subject_column] = (
-            df[args.subject_column].astype("string").str.strip().str.upper()
-        )
-        if (
-            df[args.subject_column].isna().any()
-            or df[args.subject_column].eq("").any()
-        ):
-            raise ValueError("Feature CSV contains missing subject IDs.")
-
-        features = list(dict.fromkeys(args.features))
-        missing_columns = set(features) - set(df.columns)
-        if missing_columns:
-            raise ValueError(f"Missing feature columns: {sorted(missing_columns)}")
-
-        if args.subject_column in features:
-            raise ValueError("Subject ID cannot be tested as a feature.")
-
-        # Keep only requested subjects; each remaining row should represent a WSI.
-        df = df.loc[
-            df[args.subject_column].isin(group_a | group_b)
-        ].copy()
-
-        if df.empty:
-            raise ValueError("No group subject IDs match the feature CSV.")
-
-        if "wsi_name" in df:
-            named = df.loc[
-                df["wsi_name"].notna()
-                & df["wsi_name"].astype(str).str.strip().ne("")
-            ]
-            if named.duplicated([args.subject_column, "wsi_name"]).any():
-                raise ValueError(
-                    "Duplicate subject/WSI rows found. Resolve duplicates first."
-                )
-
-        for feature in features:
-            original = df[feature]
-            numeric = pd.to_numeric(original, errors="coerce")
-            nonblank = (
-                original.notna()
-                & original.astype(str).str.strip().ne("")
-            )
-            if (nonblank & numeric.isna()).any():
-                raise ValueError(f"{feature!r} contains nonnumeric values.")
-            if np.isinf(numeric.dropna().to_numpy(dtype=float)).any():
-                raise ValueError(f"{feature!r} contains infinite values.")
-            df[feature] = numeric
-
-        # Each patient receives equal weight, regardless of WSI count.
-        patient = df.groupby(args.subject_column)[features].median()
-        a = patient.reindex(sorted(group_a))
-        b = patient.reindex(sorted(group_b))
 
         results = pd.DataFrame([
-            compare_feature(
-                feature,
-                a[feature].dropna(),
-                b[feature].dropna(),
-                len(group_a),
-                len(group_b),
-            )
+            compare_feature(feature, a, b)
             for feature in features
         ])
-
         results["FDR_q"] = bh_adjust(results["p_value"])
         results["significant_FDR_0.05"] = results["FDR_q"].lt(0.05)
         results = results.sort_values("FDR_q", na_position="last")
 
-        # Include requested patients without data in the patient-level export.
-        patient_export = pd.concat([
-            a.assign(group="A"),
-            b.assign(group="B"),
-        ]).rename_axis("subject_id").reset_index()
-
-        present = set(patient.index)
-        missing_subjects = pd.DataFrame(
-            [
-                {"subject_id": sid, "group": label}
-                for label, ids in [("A", group_a), ("B", group_b)]
-                for sid in sorted(ids - present)
-            ],
-            columns=["subject_id", "group"],
-        )
+        paths = {
+            "results": args.output_dir / "feature_comparisons.csv",
+            "a": args.output_dir / "group_A_patient_features.csv",
+            "b": args.output_dir / "group_B_patient_features.csv",
+        }
+        inputs = {args.group_a.resolve(), args.group_b.resolve()}
+        if any(path.resolve() in inputs for path in paths.values()):
+            raise ValueError("Output paths must not overwrite input files.")
 
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        results.to_csv(args.output_dir / "feature_comparisons.csv", index=False)
-        patient_export.to_csv(
-            args.output_dir / "patient_level_features.csv", index=False
-        )
-        missing_subjects.to_csv(
-            args.output_dir / "subjects_without_feature_rows.csv", index=False
-        )
+        results.to_csv(paths["results"], index=False)
+        a.reset_index().to_csv(paths["a"], index=False)
+        b.reset_index().to_csv(paths["b"], index=False)
 
-        print(f"Group A: {len(group_a & present)}/{len(group_a)} patients found")
-        print(f"Group B: {len(group_b & present)}/{len(group_b)} patients found")
+        print(f"Independent patients: A={len(a)}, B={len(b)}")
         print(f"Features tested: {results['p_value'].notna().sum()}")
         print(
             "Features with FDR q < 0.05:",
             results["significant_FDR_0.05"].sum(),
         )
-        print(f"Results saved in: {args.output_dir}")
+        print(f"Results: {paths['results']}")
 
     except (OSError, ValueError, pd.errors.ParserError) as exc:
         parser.error(str(exc))
