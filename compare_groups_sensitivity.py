@@ -5,6 +5,10 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from slide_aggregation import (
+    METHODS, aggregate_slides, count_multi_slide, extensive_features,
+)
+
 
 DEFAULT_FEATURES = [
     "n_clusters",
@@ -77,8 +81,8 @@ def load_group(path, features):
 
         df[feature] = numeric
 
-    # Each patient contributes once, regardless of their number of WSIs.
-    return df.groupby("subject_id")[features].median()
+    # Slide-level rows; aggregated to one row per patient in main().
+    return df
 
 
 def bh_adjust(p_values):
@@ -181,6 +185,14 @@ def main():
     parser.add_argument("--bootstrap", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--aggregate", choices=METHODS, default="median",
+        help="How to combine multiple WSIs per patient (default: median)",
+    )
+    parser.add_argument(
+        "--size-column",
+        help="Tissue-size column for --aggregate largest (auto-detected)",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("lobular_vs_ductal_sensitivity"),
@@ -195,8 +207,24 @@ def main():
         if set(features) & {"subject_id", "sample_id", "wsi_name"}:
             raise ValueError("Identifiers cannot be tested as features.")
 
-        a = load_group(args.group_a, features)
-        b = load_group(args.group_b, features)
+        slides_a = load_group(args.group_a, features)
+        slides_b = load_group(args.group_b, features)
+        print(
+            "Patients with more than one WSI:",
+            f"Lobular={count_multi_slide(slides_a, 'subject_id')},",
+            f"Ductal={count_multi_slide(slides_b, 'subject_id')}",
+        )
+        if args.aggregate == "auto":
+            print("Summed across WSIs:", extensive_features(features) or "none")
+
+        # Each patient contributes once, regardless of their number of WSIs.
+        a, b = (
+            aggregate_slides(
+                slides, features, "subject_id",
+                args.aggregate, args.size_column,
+            )
+            for slides in (slides_a, slides_b)
+        )
 
         overlap = set(a.index) & set(b.index)
         if overlap:
@@ -228,6 +256,7 @@ def main():
             & results["Welch_FDR_significant"]
         )
 
+        results["aggregation"] = args.aggregate
         results = results.sort_values("MWU_FDR_q", na_position="last")
 
         outputs = {

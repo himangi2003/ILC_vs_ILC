@@ -17,7 +17,8 @@ python compare_groups.py \
 Replace feature_column_1 and feature_column_2 with actual CSV column names.
 
 Method:
-- Aggregate each feature to its median across WSIs within each patient.
+- Aggregate each feature across WSIs within each patient (default: median;
+  see --aggregate and slide_aggregation.py for alternatives).
 - Compare patient-level values using Welch's two-sided t-test.
 - Report mean difference (A minus B) and a Welch 95% confidence interval.
 - Apply Benjamini–Hochberg FDR correction across tested features.
@@ -31,6 +32,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy import stats
+
+from slide_aggregation import (
+    AXIS_LABELS, METHODS, aggregate_slides, count_multi_slide,
+    extensive_features,
+)
 
 
 def load_group(path, features, subject_column):
@@ -90,8 +96,8 @@ def load_group(path, features, subject_column):
 
         df[feature] = numeric
 
-    # One observation per patient: median across that patient's WSIs.
-    return df.groupby(subject_column)[features].median()
+    # Slide-level rows; aggregated to one row per patient in main().
+    return df
 
 
 def bh_adjust(p_values):
@@ -158,7 +164,10 @@ def compare_feature(feature, group_a, group_b):
     })
 
     return result
-def plot_results(a, b, results, output_dir):
+def plot_results(
+    a, b, results, output_dir,
+    y_label=AXIS_LABELS["median"], title="Lobular vs Ductal",
+):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -227,17 +236,14 @@ def plot_results(a, b, results, output_dir):
             f"Ductal\nn = {len(values[1])}",
         ])
         ax.set_xlim(0.5, 2.5)
-        ax.set_ylabel("Patient median across WSIs")
+        ax.set_ylabel(y_label)
         ax.grid(axis="y", alpha=0.2)
         ax.spines[["top", "right"]].set_visible(False)
 
     for ax in axes.flat[len(features):]:
         ax.set_visible(False)
 
-    fig.suptitle(
-        "Tumor morphology: Lobular vs Ductal",
-        fontsize=16,
-    )
+    fig.suptitle(title, fontsize=16)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(output_dir / "patient_distributions.png", dpi=300)
     fig.savefig(output_dir / "patient_distributions.pdf")
@@ -303,6 +309,7 @@ def plot_results(a, b, results, output_dir):
         ax.grid(axis="x", alpha=0.15)
 
     fig.suptitle(
+        f"{title}\n"
         "Mean difference: Lobular − Ductal\n"
         "Welch 95% confidence intervals; red indicates FDR q < 0.05\n"
         "Each panel has its own scale and original feature units",
@@ -311,7 +318,7 @@ def plot_results(a, b, results, output_dir):
     axes[-1, 0].set_xlabel(
         "Negative: higher in Ductal    |    Positive: higher in Lobular"
     )
-    fig.tight_layout(rect=[0, 0, 0.95, 0.94])
+    fig.tight_layout(rect=[0, 0, 0.95, 0.92])
     fig.savefig(output_dir / "mean_differences.png", dpi=300)
     fig.savefig(output_dir / "mean_differences.pdf")
     plt.close(fig)
@@ -327,6 +334,18 @@ def main():
     parser.add_argument(
         "--output-dir", type=Path, default=Path("comparison_results")
     )
+    parser.add_argument(
+        "--aggregate", choices=METHODS, default="median",
+        help="How to combine multiple WSIs per patient (default: median)",
+    )
+    parser.add_argument(
+        "--size-column",
+        help="Tissue-size column for --aggregate largest (auto-detected)",
+    )
+    parser.add_argument(
+        "--title", default="Lobular vs Ductal",
+        help='Plot title, e.g. "Immune proximity: Lobular vs Ductal"',
+    )
     args = parser.parse_args()
 
     try:
@@ -334,8 +353,23 @@ def main():
         if set(features) & {args.subject_column, "sample_id", "wsi_name"}:
             raise ValueError("Identifier columns cannot be tested as features.")
 
-        a = load_group(args.group_a, features, args.subject_column)
-        b = load_group(args.group_b, features, args.subject_column)
+        slides_a = load_group(args.group_a, features, args.subject_column)
+        slides_b = load_group(args.group_b, features, args.subject_column)
+        print(
+            "Patients with more than one WSI:",
+            f"A={count_multi_slide(slides_a, args.subject_column)},",
+            f"B={count_multi_slide(slides_b, args.subject_column)}",
+        )
+        if args.aggregate == "auto":
+            print("Summed across WSIs:", extensive_features(features) or "none")
+
+        a, b = (
+            aggregate_slides(
+                slides, features, args.subject_column,
+                args.aggregate, args.size_column,
+            )
+            for slides in (slides_a, slides_b)
+        )
 
         overlap = set(a.index) & set(b.index)
         if overlap:
@@ -349,6 +383,7 @@ def main():
         ])
         results["FDR_q"] = bh_adjust(results["p_value"])
         results["significant_FDR_0.05"] = results["FDR_q"].lt(0.05)
+        results["aggregation"] = args.aggregate
         results = results.sort_values("FDR_q", na_position="last")
 
         paths = {
@@ -356,7 +391,10 @@ def main():
             "a": args.output_dir / "group_A_patient_features.csv",
             "b": args.output_dir / "group_B_patient_features.csv",
         }
-        plot_results(a, b, results, args.output_dir)
+        plot_results(
+            a, b, results, args.output_dir,
+            AXIS_LABELS[args.aggregate], args.title,
+        )
         inputs = {args.group_a.resolve(), args.group_b.resolve()}
         if any(path.resolve() in inputs for path in paths.values()):
             raise ValueError("Output paths must not overwrite input files.")
