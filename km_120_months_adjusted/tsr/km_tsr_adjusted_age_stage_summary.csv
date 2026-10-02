@@ -1,0 +1,7 @@
+subset,limit,adjust,panel,category,n,events,adjusted_OS_at_60_months,HR_comparison,adjusted_for,HR,HR_CI95_low,HR_CI95_high,wald_p
+all,120 months,age_stage,All patients,Stroma-low,222,29,0.8256349732793273,Stroma-high vs Stroma-low,"age_per_10y, stage_II, stage_III_IV",0.781362122439448,0.49376932033271403,1.2364615241216097,0.29208153141649307
+all,120 months,age_stage,All patients,Stroma-high,485,52,0.8159948689806543,Stroma-high vs Stroma-low,"age_per_10y, stage_II, stage_III_IV",0.781362122439448,0.49376932033271403,1.2364615241216097,0.29208153141649307
+all,120 months,age_stage,Lobular (ILC),Stroma-low,20,3,0.664129193018455,Stroma-high vs Stroma-low,"age_per_10y, stage_III_IV",0.38725950413402843,0.10359563145465334,1.4476471781320195,0.15851412591312064
+all,120 months,age_stage,Lobular (ILC),Stroma-high,130,12,0.8507430483117235,Stroma-high vs Stroma-low,"age_per_10y, stage_III_IV",0.38725950413402843,0.10359563145465334,1.4476471781320195,0.15851412591312064
+all,120 months,age_stage,Ductal (IDC),Stroma-low,202,26,0.8417009503285084,Stroma-high vs Stroma-low,"age_per_10y, stage_II, stage_III_IV",0.9183970511558371,0.5549443320124309,1.5198878426473303,0.7404981178023291
+all,120 months,age_stage,Ductal (IDC),Stroma-high,355,40,0.8004053073286025,Stroma-high vs Stroma-low,"age_per_10y, stage_II, stage_III_IV",0.9183970511558371,0.5549443320124309,1.5198878426473303,0.7404981178023291

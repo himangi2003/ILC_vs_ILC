@@ -1,0 +1,7 @@
+subset,limit,adjust,panel,category,n,events,adjusted_OS_at_60_months,HR_comparison,adjusted_for,HR,HR_CI95_low,HR_CI95_high,wald_p
+all,120 months,age_stage,All patients,Low/none,468,44,0.8467398960264361,High vs Low/none,"age_per_10y, stage_II, stage_III_IV",1.5759211988409596,1.002101359600586,2.478319783885138,0.04894718289894259
+all,120 months,age_stage,All patients,High,238,36,0.7695230678554988,High vs Low/none,"age_per_10y, stage_II, stage_III_IV",1.5759211988409596,1.002101359600586,2.478319783885138,0.04894718289894259
+all,120 months,age_stage,Lobular (ILC),Low/none,116,10,0.8739246615547692,High vs Low/none,"age_per_10y, stage_III_IV",1.6883047097266424,0.5531814803986072,5.152690200024888,0.3575955190576956
+all,120 months,age_stage,Lobular (ILC),High,34,5,0.7191598822951487,High vs Low/none,"age_per_10y, stage_III_IV",1.6883047097266424,0.5531814803986072,5.152690200024888,0.3575955190576956
+all,120 months,age_stage,Ductal (IDC),Low/none,352,34,0.8349453126032246,High vs Low/none,"age_per_10y, stage_II, stage_III_IV",1.4227797770323451,0.8617536214704701,2.3490499413022508,0.1680919395350875
+all,120 months,age_stage,Ductal (IDC),High,204,31,0.7905329151811877,High vs Low/none,"age_per_10y, stage_II, stage_III_IV",1.4227797770323451,0.8617536214704701,2.3490499413022508,0.1680919395350875

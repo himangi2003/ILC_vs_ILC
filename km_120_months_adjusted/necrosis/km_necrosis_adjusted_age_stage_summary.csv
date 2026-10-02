@@ -1,0 +1,7 @@
+subset,limit,adjust,panel,category,n,events,adjusted_OS_at_60_months,HR_comparison,adjusted_for,HR,HR_CI95_low,HR_CI95_high,wald_p
+all,120 months,age_stage,All patients,No necrosis,226,19,0.8643674178309673,Necrosis vs No necrosis,"age_per_10y, stage_II, stage_III_IV",1.5109147953062525,0.8963988392336635,2.546705125842162,0.12129092381159036
+all,120 months,age_stage,All patients,Necrosis,480,61,0.7972319506655255,Necrosis vs No necrosis,"age_per_10y, stage_II, stage_III_IV",1.5109147953062525,0.8963988392336635,2.546705125842162,0.12129092381159036
+all,120 months,age_stage,Lobular (ILC),No necrosis,63,7,0.8635339615890625,Necrosis vs No necrosis,"age_per_10y, stage_III_IV",0.6006326910588907,0.2095050031331083,1.7219618824063951,0.3428074129102961
+all,120 months,age_stage,Lobular (ILC),Necrosis,87,8,0.8164823780758136,Necrosis vs No necrosis,"age_per_10y, stage_III_IV",0.6006326910588907,0.2095050031331083,1.7219618824063951,0.3428074129102961
+all,120 months,age_stage,Ductal (IDC),No necrosis,163,12,0.8636040912217944,Necrosis vs No necrosis,"age_per_10y, stage_II, stage_III_IV",1.975357322931261,1.0406273732335534,3.7496962444235113,0.03736568201961178
+all,120 months,age_stage,Ductal (IDC),Necrosis,393,53,0.7964159065292032,Necrosis vs No necrosis,"age_per_10y, stage_II, stage_III_IV",1.975357322931261,1.0406273732335534,3.7496962444235113,0.03736568201961178

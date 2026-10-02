@@ -8,6 +8,14 @@ patients, Lobular (ILC) and Ductal (IDC). Each panel has censor ticks, 95%
 confidence bands, a number-at-risk table, the log-rank p-value and an
 unadjusted Cox HR for the second category vs the first.
 
+With --adjust age_stage (or stage) the panels show covariate-adjusted
+survival curves instead (direct adjustment): a Cox model with age and AJCC
+stage, stratified by category, predicts every patient's survival as if they
+were in each category, and the predictions are averaged. Both curves thus
+share the panel's age/stage mix. The HR shown is adjusted (Cox with category
++ covariates, Wald p). Stage is I / II / III-IV, or I-II vs III-IV within
+ILC (few deaths). Patients with unknown stage are excluded.
+
 Requires: pip install pandas numpy scipy matplotlib lifelines
 """
 import warnings
@@ -27,7 +35,7 @@ from matplotlib.lines import Line2D
 from compare_groups_sensitivity import load_group
 from slide_aggregation import aggregate_slides
 from subset_analysis import GROUPS, SUBSET, receptor_status
-from survival_analysis import DAYS_PER_MONTH, load_survival
+from survival_analysis import DAYS_PER_MONTH, load_covariates, load_survival
 
 # Reference category takes slot 1 (blue, solid); comparison slot 2 (orange, dashed).
 REFERENCE_STYLE = ("#2a78d6", "-")
@@ -54,6 +62,8 @@ def add_common_arguments(parser, default_output):
                              "x-axis ends there (unit: --limit-unit)")
     parser.add_argument("--limit-unit", choices=["days", "months"], default="months",
                         help="Unit of --limit; with days the plot is drawn in days")
+    parser.add_argument("--adjust", choices=["none", "stage", "age_stage"], default="none",
+                        help="Draw covariate-adjusted curves (direct adjustment)")
     parser.add_argument("--title", default=None)
     parser.add_argument("--output-dir", type=Path, default=Path(default_output))
 
@@ -194,12 +204,111 @@ def draw_panel(ax, frame, title, max_time, landmark, column, categories, unit="M
     return summary
 
 
+def adjusted_design(frame, column, exposed, adjust, stage_coding):
+    """Category indicator plus covariates; complete cases only."""
+    design = pd.DataFrame({"exposed": frame[column].eq(exposed).astype(float)}, index=frame.index)
+    if adjust == "age_stage":
+        design["age_per_10y"] = frame["age"] / 10
+    if stage_coding == "binary":
+        design["stage_III_IV"] = frame["stage"].eq("III-IV").astype(float)
+    else:
+        design["stage_II"] = frame["stage"].eq("II").astype(float)
+        design["stage_III_IV"] = frame["stage"].eq("III-IV").astype(float)
+    design["time"] = frame["time"]
+    design["event"] = frame["event"]
+    known = frame["stage"].notna() & (frame["age"].notna() if adjust == "age_stage" else True)
+    design = design.loc[known]
+    # Drop covariates that are constant in this panel (e.g. no stage III-IV).
+    constant = [c for c in design.columns[1:-2] if design[c].nunique() < 2]
+    return design.drop(columns=constant)
+
+
+def draw_adjusted_panel(ax, frame, title, max_time, landmark, column, categories,
+                        unit, adjust, stage_coding):
+    reference, exposed = list(categories)
+    design = adjusted_design(frame, column, exposed, adjust, stage_coding)
+    covariates = [c for c in design.columns if c not in ("exposed", "time", "event")]
+    stats = {"HR_comparison": f"{exposed} vs {reference}", "adjusted_for": ", ".join(covariates),
+             "HR": np.nan, "HR_CI95_low": np.nan, "HR_CI95_high": np.nan, "wald_p": np.nan}
+    fitters, handles, labels, summary = [], [], [], []
+    grid = np.linspace(0, max_time, 400)
+
+    enough = design["event"].sum() >= 3 and design["exposed"].nunique() == 2
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        if enough:
+            try:
+                model = CoxPHFitter().fit(design, "time", "event")
+                row = model.summary.loc["exposed"]
+                stats.update({"HR": row["exp(coef)"], "HR_CI95_low": row["exp(coef) lower 95%"],
+                              "HR_CI95_high": row["exp(coef) upper 95%"], "wald_p": row["p"]})
+            except Exception:
+                pass
+        curves = {}
+        try:
+            # Stratifying by category lets each keep its own baseline hazard.
+            stratified = CoxPHFitter().fit(design, "time", "event", strata=["exposed"])
+            for value in (0.0, 1.0):
+                counterfactual = design.drop(columns=["time", "event"]).assign(exposed=value)
+                curves[value] = stratified.predict_survival_function(
+                    counterfactual, times=grid).mean(axis=1).to_numpy()
+        except Exception:
+            curves = {}
+
+    for value, (category, (color, linestyle)) in zip((0.0, 1.0), categories.items()):
+        group = design.loc[design["exposed"].eq(value)]
+        if group.empty:
+            continue
+        events = int(group["event"].sum())
+        # Unplotted KM fit, used only for the number-at-risk table.
+        fitters.append(KaplanMeierFitter(label=category).fit(group["time"], group["event"]))
+        if value in curves:
+            last = group["time"].max()
+            shown = grid <= last
+            ax.step(grid[shown], curves[value][shown], where="post",
+                    color=color, linestyle=linestyle, linewidth=2)
+            adjusted_at = float(np.interp(landmark, grid, curves[value])) if landmark <= last else np.nan
+        else:
+            adjusted_at = np.nan
+        handles.append(Line2D([], [], color=color, linestyle=linestyle, linewidth=2))
+        labels.append(f"{category}  (n={len(group)}, events={events})")
+        summary.append({"panel": title, "category": category, "n": len(group), "events": events,
+                        f"adjusted_OS_at_{landmark:g}_{unit.lower()}": adjusted_at, **stats})
+
+    ax.set_title(title, fontsize=11, color=TEXT, loc="left")
+    ax.set_xlim(0, max_time)
+    ax.set_ylim(0, 1.02)
+    ax.set_xticks(np.arange(0, max_time + 1e-9, tick_step(max_time, unit)))
+    ax.set_xlabel(f"{unit} from diagnosis", color=MUTED)
+    ax.set_ylabel("Adjusted overall survival", color=MUTED)
+    ax.grid(axis="y", color=GRID, linewidth=0.8)
+    ax.tick_params(colors=MUTED, labelcolor=TEXT)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.legend(handles, labels, loc="lower left", frameon=False, fontsize=8.5, labelcolor=TEXT)
+
+    if np.isfinite(stats["HR"]):
+        text = (f"Adjusted HR {exposed.lower()} vs {reference.lower()} = {stats['HR']:.2f} "
+                f"({stats['HR_CI95_low']:.2f}-{stats['HR_CI95_high']:.2f})\n"
+                f"Wald p = {stats['wald_p']:.3g}; adjusted for {stats['adjusted_for']}")
+    else:
+        text = "Too few events for an adjusted HR"
+    ax.text(0.98, 0.98, text, transform=ax.transAxes, ha="right", va="top", fontsize=8.5, color=TEXT)
+
+    if fitters:
+        add_at_risk_counts(*fitters, ax=ax, rows_to_show=["At risk"], fontsize=8)
+    return summary
+
+
 def run(parser, args, stem, feature, classify, reference, exposed, name, title):
     """Load, split with classify(values) -> bool (True = exposed), plot and save."""
     categories = {reference: REFERENCE_STYLE, exposed: EXPOSED_STYLE}
     try:
         data = load_patients(args, stem, feature)
         data["category"] = np.where(classify(data[feature]), exposed, reference)
+        if args.adjust != "none":
+            data = data.join(load_covariates(args.clinical, args.patient_column))
+            name = f"{name}_adjusted_{args.adjust}"
 
         panels = [
             ("All patients", data),
@@ -210,10 +319,17 @@ def run(parser, args, stem, feature, classify, reference, exposed, name, title):
         unit, end, landmark = time_axis(args)
         summary = []
         for ax, (panel_title, frame) in zip(axes, panels):
-            summary += draw_panel(ax, frame, panel_title, end, landmark,
-                                  "category", categories, unit)
+            if args.adjust == "none":
+                summary += draw_panel(ax, frame, panel_title, end, landmark,
+                                      "category", categories, unit)
+            else:
+                coding = "binary" if panel_title.startswith("Lobular") else "3level"
+                summary += draw_adjusted_panel(ax, frame, panel_title, end, landmark, "category",
+                                               categories, unit, args.adjust, coding)
 
         limit = f"; censored at {args.limit:g} {args.limit_unit}" if args.limit else ""
+        if args.adjust != "none":
+            limit += "; adjusted for " + ("age and stage" if args.adjust == "age_stage" else "stage")
         fig.suptitle(args.title or f"{title} ({args.subset} patients{limit})",
                      fontsize=13, color=TEXT)
         fig.subplots_adjust(left=0.05, right=0.98, top=0.88, bottom=0.27, wspace=0.28)
@@ -224,6 +340,7 @@ def run(parser, args, stem, feature, classify, reference, exposed, name, title):
                         bbox_inches="tight", facecolor="white")
         plt.close(fig)
         summary = pd.DataFrame(summary)
+        summary.insert(0, "adjust", args.adjust)
         summary.insert(0, "limit", f"{args.limit:g} {args.limit_unit}" if args.limit else "none")
         summary.insert(0, "subset", args.subset)
         summary.to_csv(args.output_dir / f"{name}_summary.csv", index=False)
@@ -232,5 +349,5 @@ def run(parser, args, stem, feature, classify, reference, exposed, name, title):
         parser.error(str(exc))
 
     pd.set_option("display.width", 200)
-    print(summary.drop(columns=["subset", "limit"]).to_string(index=False, float_format=lambda x: f"{x:.3g}"))
+    print(summary.drop(columns=["subset", "limit", "adjust"]).to_string(index=False, float_format=lambda x: f"{x:.3g}"))
     print(f"\nSaved {args.output_dir / (name + '.png')} and {name}_summary.csv")

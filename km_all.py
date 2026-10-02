@@ -5,12 +5,13 @@ Requires km_common.py, km_tsr.py, km_stil.py, km_necrosis.py, km_immune.py,
 km_morphology.py and their dependencies in the same folder.
 
 Plots (one folder each under --output-root):
-  TSR category, sTIL, necrosis, 7 immune-proximity features and 9
+  TSR category, sTIL, necrosis (any, and area), 7 immune-proximity features and 9
   tumor-morphology features (median split for the last two groups).
 
   python km_all.py --output-root km_120_months          # default: 120 months
   python km_all.py --subset ER+/HER2- --output-root km_120_months_er_her2
   python km_all.py --limit 60 --output-root km_60_months
+  python km_all.py --adjust age_stage --output-root km_120_months_adjusted
 
 All summaries are also combined into <output-root>/km_all_summary.csv.
 """
@@ -34,6 +35,7 @@ def jobs():
     yield "tsr", "km_tsr.py", [], "km_tsr"
     yield "stil", "km_stil.py", [], "km_stil"
     yield "necrosis", "km_necrosis.py", [], "km_necrosis"
+    yield "necrosis_area", "km_necrosis_area.py", [], "km_necrosis_area"
     for script, features, stem in (("km_immune.py", IMMUNE, "km_immune"),
                                    ("km_morphology.py", MORPHOLOGY, "km_morphology")):
         for feature in features:
@@ -53,12 +55,15 @@ def main():
     parser.add_argument("--limit-unit", choices=["days", "months"], default="months",
                         help="Unit of --limit (default months)")
     parser.add_argument("--subset", choices=["all", "ER+/HER2-"], default="all")
+    parser.add_argument("--adjust", choices=["none", "stage", "age_stage"], default="none",
+                        help="Covariate-adjusted curves (see km_common.py)")
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--output-root", type=Path, required=True)
     args = parser.parse_args()
 
     common = ["--limit", f"{args.limit:g}", "--limit-unit", args.limit_unit,
-              "--subset", args.subset, "--data-dir", args.data_dir]
+              "--subset", args.subset, "--data-dir", args.data_dir, "--adjust", args.adjust]
+    suffix = "" if args.adjust == "none" else f"_adjusted_{args.adjust}"
     summaries, failed = [], []
     for folder, script, extra, stem in jobs():
         output = args.output_root / folder
@@ -71,7 +76,7 @@ def main():
             failed.append(folder)
             print(result.stderr.strip().splitlines()[-1] if result.stderr else "failed")
             continue
-        summary = pd.read_csv(output / f"{stem}_summary.csv")
+        summary = pd.read_csv(output / f"{stem}{suffix}_summary.csv")
         summary.insert(0, "plot", folder)
         summaries.append(summary)
 
